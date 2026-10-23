@@ -23,7 +23,7 @@ def init(config, section):
 
 # ******************************************************************************
 
-def getNameFromPink(user):
+def getNameFromPinky(user):
   cmd = "pinky %s | sed -E 's/\S+\s+//' | cut -c1-19" % (user)
 
   result = subprocess.run([cmd], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
