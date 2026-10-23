@@ -1,23 +1,26 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import time, getopt, sys, os, grp, subprocess
 from glob import glob
 from datetime import date, datetime, timedelta
-import ConfigParser
+import configparser
 from subprocess import Popen, PIPE
 import re
+
+# Get the path to 'lib' and add it to Python's search path
+lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
+sys.path.insert(0, lib_path)
+
+import accountinfo, userinfo
 
 # Constant, must be set
 
 # Global variables (do not edit)
 username     = ""
 totalSamples = 0
-priv         = 0
 rootDir      = ''
 jobsize_min  = ""
 print_date   = 0
-notur        = 0
-ntnu         = 0
 old_log      = 0
 categories   = []
 
@@ -37,10 +40,6 @@ startDate      = 0.0
 endDate        = 0.0
 machine        = ""
 nodesRegex     = ''
-admGroup       = ''
-Gold           = ''   # 0 = SLURM, 1 = Gold
-goldPath       = ""
-slurmQuotaFile = ""
 islands        = []
 coresPerNode   = -1
 
@@ -48,19 +47,18 @@ CORE_BINS      = 6
 WALLTIME_BINS  = 4
 failed_alloc   = ""
 
-SYSTEM = ['OTHER', 'System', 'Script', 'MPICH', 'OpenMPI', 'Intel']
-SYSTEM_PROJECTS = ['nn9999k', 'ntnusupport', 'testsupport', 'mifasupport', 'uio', 'staff', 'uit-swtest-001', 'uit-staff-000', 'norgrid', 'test', 'atlas-conf']
+SYSTEM = ['Unknown', 'System', 'Script', 'MPICH', 'OpenMPI', 'Intel']
 IGNORED_USERS = ['dummy', 'installer', 'galaxy']
 
 # ******************************************************************************
 
 def init():
   global rootDir, categories
-  global startDate, endDate, machine, nodesRegex, admGroup
-  global Gold, goldPath, slurmQuotaFile, islands, coresPerNode
+  global startDate, endDate, machine, nodesRegex
+  global islands, coresPerNode
 
-  reload(sys)  
-  sys.setdefaultencoding('utf8')
+#  reload(sys)  
+#  sys.setdefaultencoding('utf8')
 
   # Get the root directory, where this script is located
 
@@ -86,7 +84,7 @@ def init():
   rootDir = absPath
 
   # Read info from config file
-  config = ConfigParser.ConfigParser()
+  config = configparser.ConfigParser()
   config.read(rootDir+'etc/config')
   date = config.get('Appusage', 'startDate').strip()
   startDate = float(time.mktime( time.strptime(date, "%y%m%d") ))
@@ -95,25 +93,18 @@ def init():
   endDate = float(time.mktime( time.strptime(date, "%y%m%d %H%M%S") ))
   machine = config.get('Appusage', 'machine').strip()
   nodesRegex = config.get('Appusage', 'nodesRegex').strip()
-  admGroup = config.get('Appusage', 'admGroup').strip()
   tmp =  config.get('Appusage', 'coresPerNode').strip()
   try:
     coresPerNode = int(tmp)
   except ValueError:
-    print "Error: coresPerNode is not a number"
+    print("Error: coresPerNode is not a number")
     return 0
 
-  if config.has_option("Appusage", "gold"):
-    Gold = config.get('Appusage', 'gold').strip()
-  else:
-    if config.get('Appusage', 'slurm').strip() == "1":
-      Gold = "0"
-    else:
-      Gold = "1"
-  if Gold == "1":
-    goldPath = config.get('Appusage', 'goldPath').strip()
-  else:
-    slurmQuotaFile = config.get('Appusage', 'slurmQuotaFile').strip()
+  if not accountinfo.init(config, 'Appusage'):
+    return 0
+
+  if not userinfo.init(config, 'Appusage'):
+    return 0
 
   if config.has_option("Appusage", "islands"):
     line = config.get('Appusage', 'islands').strip()
@@ -127,48 +118,16 @@ def init():
         single = int(limits[0])
         islands.append([single,single])
 
-  # Read a list of categories from the configuration file
-  cfgFile = rootDir + 'etc/categories'
-  if os.path.exists(cfgFile):
-    for line in open(cfgFile):
-      # Remove the ending newline character
-      line = line.rstrip('\n')
+  # Read a list of categories from the category-list file in the log dir
+  categoryFile = rootDir + 'log/category-list'
+  if os.path.exists(categoryFile):
+    for line in open(categoryFile):
+      categories.append( line.rstrip('\n') )
 
-      # Split the line into tab separated words
-      words = line.split('\t')
-      if len(words) < 2: # Skip empy lines
-	continue
-
-      last = words[len(words)-1]
-      if last not in categories:
-	categories.append(last)
-
-  categories.append("OTHER")
+  categories.append("Unknown")
 
   return 1
 
-
-# ******************************************************************************
-
-# check whether the account name matches the specified flags
-def checkAccountName(account):
-  global notur, ntnu
-
-  ok = 1
-
-  if account in SYSTEM_PROJECTS:
-    ok = 0
-  elif notur and ntnu:
-    if (account[:2]!="nn" or account[-1]!="k") and (account[:4]!="ntnu" or "support" in account):
-      ok = 0
-  elif notur:
-    if account[:2]!="nn" or account[-1]!="k":
-      ok = 0
-  elif ntnu:
-    if account[:4]!="ntnu" or "support" in account:
-      ok = 0
-
-  return ok
 
 # ******************************************************************************
 
@@ -194,8 +153,8 @@ def interpretLogData(file, line):
   fields = line.split(':')
 
   if len(fields) < 4:
-    print "Error: the file \"%s\" contains a line with an error. The reason for this may be that the file was being updated while you read it. Contact a system administrator, if the error persists." % (file)
-    print "Skipping line"
+    print("Error: the file \"%s\" contains a line with an error. The reason for this may be that the file was being updated while you read it. Contact a system administrator, if the error persists." % (file))
+    print("Skipping line")
     error = 1
   if error == 0 and len(fields) < 9:
     error = 1
@@ -221,9 +180,9 @@ def interpretLogData(file, line):
     except ValueError:
       error = 1
   if not error:
-    user     = fields[1]
+    user    = fields[1]
     try:
-      eff      = float(fields[2])
+      eff   = float(fields[2])
     except ValueError:
       error = 1
 
@@ -246,10 +205,10 @@ def interpretLogData(file, line):
     if specific_projects and not account in specific_projects:
       error = 1
 
-    if category!="OTHER" and category!="Script" and eff==0.0: 
+    if category!="Unknown" and category!="Script" and eff==0.0: 
       error = 1
 
-    if not checkAccountName(account):
+    if not accountinfo.checkAccountName(account):
       error = 1
 
   return date, user, category, exe, jobid, nNodes, nCores, account, error
@@ -290,10 +249,10 @@ def calcOverallStat(logDirs):
     coresCount[category]   = dict()
 
   for logDir in logDirs:
-    # Go through each file in the log dir, but skip .illegal files
+    # Go through each file in the log dir, but skip .err files
     for file in glob(logDir+nodesRegex):
-      # Skip the .illegal files, if the nodesRegex expression includes those
-      if ".illegal" in file:
+      # Skip the .err files, if the nodesRegex expression includes those
+      if ".err" in file:
         continue
 
       # Get the name of the compute node from the file name
@@ -303,6 +262,16 @@ def calcOverallStat(logDirs):
       for line in open(file):
         date, user, category, exe, jobid, nNodes, nCores, account, error = interpretLogData(file, line)
         if error:
+          continue
+
+        # Conversion from string to int
+        if nNodes:
+          inNodes = int(float(nNodes))
+        if nCores:
+          inCores = int(float(nCores))
+
+        if not category in entriesCount:
+          print("Error: category %s not found" % (category))
           continue
 
         # Find entries over multiple accounts
@@ -330,11 +299,11 @@ def calcOverallStat(logDirs):
               # Same exe as before
               if not jobid in localNodes[category][exe]:
                 # New job using same exe as before
-                localNodes[category][exe][jobid] = (int(nNodes), user)
+                localNodes[category][exe][jobid] = (inNodes, user)
             else:
               # New exe
               localNodes[category][exe] = dict()
-              localNodes[category][exe][jobid] = (int(nNodes), user)
+              localNodes[category][exe][jobid] = (inNodes, user)
           elif not exe in localNodes[category]:
             # Log entry was created by a previous version of appusage, so the 
             # information about job id and the number of nodes is missing.
@@ -353,18 +322,18 @@ def calcOverallStat(logDirs):
             # Total
             if exe in coresCount[category]:
               coresCount[category][exe] = coresCount[category][exe] + 1
-              cores[category][exe] = cores[category][exe] + int(nCores)
+              cores[category][exe] = cores[category][exe] + inCores
             else:
               coresCount[category][exe] = 1
-              cores[category][exe] = int(nCores)
+              cores[category][exe] = inCores
 
             # Per user
             if exe in coresCount_per_user[user][category]:
               coresCount_per_user[user][category][exe] = coresCount_per_user[user][category][exe] + 1
-              cores_per_user[user][category][exe] = cores_per_user[user][category][exe] + int(nCores)
+              cores_per_user[user][category][exe] = cores_per_user[user][category][exe] + inCores
             else:
               coresCount_per_user[user][category][exe] = 1
-              cores_per_user[user][category][exe] = int(nCores)
+              cores_per_user[user][category][exe] = inCores
           else:
             # Log entry was created by a previous version of appusage, so the 
             # information about number of cores is missing.
@@ -412,9 +381,9 @@ def calcOverallStat(logDirs):
             # Only store the last nCores number from each compute node, since
             # nCores comes from the ps command's "pcpu" number which is an
             # average over time.
-            cores_per_user_per_job[user][jobid][computeNode] = int(nCores)
-            cores_per_account_per_user_per_job[account][user][jobid][computeNode] = int(nCores)
-            nodes_per_account_per_user_per_job[account][user][jobid] = int(nNodes)
+            cores_per_user_per_job[user][jobid][computeNode] = inCores
+            cores_per_account_per_user_per_job[account][user][jobid][computeNode] = inCores
+            nodes_per_account_per_user_per_job[account][user][jobid] = inNodes
 
           # find categories per account per user per job
           if not account in category_per_account_per_user_per_job:
@@ -656,9 +625,9 @@ def getIslands(jobid):
   global islands
 
   # Get the list of nodes that the job ran on in short format
-  p1 = Popen(['sacct', '-j', jobid, '--format=NodeList%-800', '-n'],stdout=PIPE)
+  p1 = Popen(['sacct', '-j', jobid, '--format=NodeList%-800', '-n'],stdout=PIPE, text=True)
   short = p1.communicate()[0].strip().split('\n')[0].strip()
-  p2 =  Popen(['scontrol', 'show', 'hostnames', short],stdout=PIPE)
+  p2 =  Popen(['scontrol', 'show', 'hostnames', short],stdout=PIPE, text=True)
   nodes = p2.communicate()[0].strip().split('\n')
 
   islands_for_job = []
@@ -744,10 +713,10 @@ def calcPerDayStat(logDirs):
     job_start         = dict()
     job_end           = dict()
 
-    # Go through each file in the log dir, but skip .illegal files
+    # Go through each file in the log dir, but skip .err files
     for file in glob(logDir+nodesRegex):
-      # Skip the .illegal files, if the nodesRegex expression includes those
-      if ".illegal" in file:
+      # Skip the .err files, if the nodesRegex expression includes those
+      if ".err" in file:
         continue
 
       # Prosess each line in this log-file
@@ -772,10 +741,10 @@ def calcPerDayStat(logDirs):
     walltime_list_per_month = [ [] for x in range(months_in_period) ]
     now            = datetime.now()
 
-    # Go through each file in the log dir, but skip .illegal files
+    # Go through each file in the log dir, but skip .err files
     for file in glob(logDir+nodesRegex):
-      # Skip the .illegal files, if the nodesRegex expression includes those
-      if ".illegal" in file:
+      # Skip the .err files, if the nodesRegex expression includes those
+      if ".err" in file:
         continue
 
       # Prosess each line in this log-file
@@ -983,9 +952,9 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
     for exe in entriesCount[category]:
       samples += entriesCount[category][exe]
 
-  print "Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y"))
-  print "Date: %s" % (date.today().strftime("%A %d. %B %Y"))
-  print "Number of samples:", samples
+  print("Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y")))
+  print("Date: %s" % (date.today().strftime("%A %d. %B %Y")))
+  print("Number of samples:", samples)
 
   if samples == 0: return
 
@@ -1001,9 +970,9 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
   s = sorted(total, key=lambda k: total[k], reverse=True)
 
   # Print the sorted list
-  print "\nApplication                     Category Program Users Main      Typical/  Cores"
-  print   "                                  usage   usage        user      max nodes /node"
-  print   "--------------------------------------------------------------------------------"
+  print("\nApplication                     Category Program Users Main      Typical/  Cores")
+  print(  "                                  usage   usage        user      max nodes /node")
+  print(  "--------------------------------------------------------------------------------")
   for category in s:
     # Print the sum of the individual percentages
     sum = 0.0
@@ -1027,9 +996,9 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
     totalEntries = dict()
     for exe in entries[category]:
       for user in entries[category][exe]:
-	if user not in totalEntries:
-	  totalEntries[user] = 0
-	totalEntries[user] = totalEntries[user] + entries[category][exe][user]
+        if user not in totalEntries:
+          totalEntries[user] = 0
+        totalEntries[user] = totalEntries[user] + entries[category][exe][user]
 
     nUsers = "%4d" % (len(totalEntries))
 
@@ -1038,13 +1007,13 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
     max = -1
     for user in totalEntries:
       if totalEntries[user] > max:
-	mainUser = user
-	max      = totalEntries[user] 
+        mainUser = user
+        max      = totalEntries[user] 
 
     if raw_mode==1:
-      print "%-31s %s           %s  %s" % (category, usage, nUsers, mainUser)
+      print("%-31s %s           %s  %s" % (category, usage, nUsers, mainUser))
     else:
-      print "%-31s %s%%          %s  %s" % (category, usage, nUsers, mainUser)
+      print("%-31s %s%%          %s  %s" % (category, usage, nUsers, mainUser))
 
     # Print the individual percentages
     if specific_exe == "":
@@ -1076,6 +1045,10 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
             mainUser = user
             max      = entries[category][exe][user] 
 
+        # Cut too long user names
+        if len(mainUser) >= 12:
+          mainUser = mainUser[:12]
+
         # Calculate the number of spaces between the user name and typical nodes
         nSpaces = 0
         spaces = ""
@@ -1089,29 +1062,22 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
           nCores = "    "
             
         if raw_mode:
-          print "  %-39s%s  %s  %s%s%s%s %s" % (exe[:39], usage, nUsers, mainUser, spaces, sTypical, sMax, nCores)
+          print("  %-39s%s  %s  %s%s%s%s%5s" % (exe[:38], usage, nUsers, mainUser, spaces, sTypical, sMax, nCores))
         else:
-          print "  %-40s%s%% %s  %s%s%s%s %s" % (exe[:40], usage, nUsers, mainUser, spaces, sTypical, sMax, nCores)
+          print("  %-40s%s%% %s  %s%s%s%s%5s" % (exe[:39], usage, nUsers, mainUser, spaces, sTypical, sMax, nCores))
     else:
       exe = specific_exe
-
-      if raw_mode==1:
-        usage = "%6d" % entries[category][exe][user]
-      else:
-        usage = "%5.1f" % (entries[category][exe][user]*100.0 / entriesCount[category][exe])
-      if usage.strip() == "0.0": break
 
       # Sort the list
       u2 = sorted(entries[category][exe], key=lambda e: entries[category][exe][e], reverse=True)
 
       # Find the main user by number of entries in the log files
-#      for user in entries[category][exe]:
       for user in u2:
         if raw_mode==1:
           usage = "%6d" % entries[category][exe][user]
         else:
           usage = "%5.1f" % (entries[category][exe][user]*100.0 / entriesCount[category][exe])
-        if usage.strip() == "0.0": break
+      #  if usage.strip() == "0.0": break
 
         nUsers = "%4d" % (1)
         sUser = user
@@ -1123,6 +1089,10 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
         else:
           sTypical = ""
           SMax     = ""
+
+        # Cut too long user names
+        if len(sUser) >= 12:
+          sUser = sUser[:12]
 
         # Calculate the number of spaces between the user name and typical nodes
         nSpaces = 0
@@ -1137,10 +1107,10 @@ def PrintDefault(entries, entriesCount, nodes, nodes_per_user, cores, coresCount
           nCores = "    "
 
         if raw_mode:
-          print "  %-39s%s  %s  %s%s%s%s %s" % (exe[:39], usage, nUsers, sUser, spaces, sTypical, sMax, nCores)
+          print("  %-39s%s  %s  %s%s%s%s%5s" % (exe[:38], usage, nUsers, sUser, spaces, sTypical, sMax, nCores))
         else:
-          print "  %-40s%s%% %s  %s%s%s%s %s" % (exe[:40], usage, nUsers, sUser,spaces, sTypical, sMax, nCores)
-    print "  " # so that grep -v "^  " works
+          print("  %-40s%s%% %s  %s%s%s%s%5s" % (exe[:39], usage, nUsers, sUser, spaces, sTypical, sMax, nCores))
+    print("  ") # so that grep -v "^  " works
 
 # ******************************************************************************
 
@@ -1152,9 +1122,9 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
     for exe in entriesCount[category]:
       samples += entriesCount[category][exe]
 
-  print "Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y"))
-  print "Date: %s" % (date.today().strftime("%A %d. %B %Y"))
-  print "Number of samples:", samples
+  print("Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y")))
+  print("Date: %s" % (date.today().strftime("%A %d. %B %Y")))
+  print("Number of samples:", samples)
 
   if samples == 0: return
 
@@ -1163,7 +1133,7 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
   for category in categories:
     for exe in entriesCount[category]:
       for user in entries[category][exe]:
-	if user in samples_per_user:
+        if user in samples_per_user:
           samples_per_user[user] = samples_per_user[user] + entries[category][exe][user]
         else:
           samples_per_user[user] = entries[category][exe][user]
@@ -1172,10 +1142,10 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
   susers = sorted(samples_per_user, key=lambda k: samples_per_user[k], reverse=True)
 
   # Print the sorted list
-  print "\nUser                  Samples   Category  Program  Typical/  Cores   Cores"
-  print   "  Category                        usage    usage   max nodes /node   /job"
-  print   "    Program"
-  print   "--------------------------------------------------------------------------------"
+  print("\nUser                  Samples   Category  Program  Typical/  Cores   Cores")
+  print(  "  Category                        usage    usage   max nodes /node   /job")
+  print(  "    Program")
+  print(   "--------------------------------------------------------------------------------")
   for user in susers:
     sum = samples_per_user[user]
 
@@ -1193,9 +1163,9 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
         if usage.strip() == "0.0": break
 
     if raw_mode==1:
-      print "%-21s %s                                      %6d" % (user, usage, cores_per_job[user][0])
+      print("%-21s %s                                      %6d" % (user, usage, cores_per_job[user][0]))
     else:
-      print "%-20s %s%%                                       %6d" % (user, usage, cores_per_job[user][0])
+      print("%-20s %s%%                                       %6d" % (user, usage, cores_per_job[user][0]))
 
     # Get the number of samples for each category
     samples_per_category = dict()
@@ -1224,9 +1194,9 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
         usage = "%6.1f" % (sum*100.0 / samples_per_user[user])
 
       if raw_mode==1:
-        print "  %-31s %s" % (category, usage)
+        print( "  %-31s %s" % (category, usage))
       else:
-        print "  %-29s %s%%" % (category, usage)
+        print( "  %-29s %s%%" % (category, usage))
 
       # Get the number of samples for each program
       samples_per_program = dict()
@@ -1260,16 +1230,16 @@ def printUsers(entries, entriesCount, nodes_per_user, cores_per_user, coresCount
 
         if specific_exe == "":
           if raw_mode:
-            print "    %-37s %s    %s %s" % (exe[:37], usage, nNodes, nCores)
+            print( "    %-37s %s    %s %s" % (exe[:37], usage, nNodes, nCores))
           else:
-            print "    %-38s %s%%   %s %s" % (exe[:38], usage, nNodes, nCores)
+            print( "    %-38s %s%%   %s %s" % (exe[:38], usage, nNodes, nCores))
         else:
           for user in entries[category][exe]:
             if raw_mode:
-              print "    %-37s %s    %s %s" % (exe[:37], usage, nNodes, nCores)
+              print( "    %-37s %s    %s %s" % (exe[:37], usage, nNodes, nCores))
             else:
-              print "    %-38s %s%%   %s %s" % (exe[:38], usage, nNodes, nCores)
-    print "  " # so that grep -v "^  " works
+              print( "    %-38s %s%%   %s %s" % (exe[:38], usage, nNodes, nCores))
+    print("  ") # so that grep -v "^  " works
 
 # ******************************************************************************
 
@@ -1281,9 +1251,9 @@ def printCores(entriesCount, stat_per_account):
     for exe in entriesCount[category]:
       samples += entriesCount[category][exe]
 
-  print "Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y"))
-  print "Date: %s" % (date.today().strftime("%A %d. %B %Y"))
-  print "Number of samples:", samples
+  print("Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y")))
+  print("Date: %s" % (date.today().strftime("%A %d. %B %Y")))
+  print("Number of samples:", samples)
 
   if samples == 0: return
 
@@ -1301,9 +1271,9 @@ def printCores(entriesCount, stat_per_account):
   # Sort the lists, so that the highest numbers are at the top
   saccount = sorted(jobs_per_account, key=lambda k: jobs_per_account[k], reverse=True)
 
-  print "\nProject         Category         Number  Typical   Max  Typical   Max"
-  print "  User                           of jobs  Nodes   Nodes  Cores   Cores"
-  print   "--------------------------------------------------------------------------------"
+  print("\nProject         Category         Number  Typical   Max  Typical   Max")
+  print("  User                           of jobs  Nodes   Nodes  Cores   Cores")
+  print(  "--------------------------------------------------------------------------------")
 
   # Print the sorted list
   for account in saccount:
@@ -1311,188 +1281,12 @@ def printCores(entriesCount, stat_per_account):
 #    if abbrev == "mifa" or abbrev == "mipa" or account == "mip000s" or account == "metcoop":
 #      continue
 
-    print "%-14s                 %6d" % (account, jobs_per_account[account])
+    print("%-14s                 %6d" % (account, jobs_per_account[account]))
 
     # Count the 
     for user in stat_per_account[account]:
-      print "  %-13s\t%-8s\t%5d\t%6d\t%6d\t%6d\t%6d" % (user, stat_per_account[account][user][0], stat_per_account[account][user][1], stat_per_account[account][user][2], stat_per_account[account][user][3], stat_per_account[account][user][4], stat_per_account[account][user][5])
-    print
-
-
-# ******************************************************************************
-
-# Get account information from Gold or Slurm
-def getAccountInfo():
-  global Gold, slurmQuotaFile
-
-  accounts      = []
-  account_users = dict()
-  account_quota = dict()
-  account_usage = dict()
-
-  if Gold == "1":
-    all_accounts  = []
-    all_users     = dict()
-
-    # Get the list of all accounts and users from Gold
-    cmd = "%s/glsproject --raw -q" % (goldPath)
-    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    lines = p.communicate()[0].strip().split('\n')
-    for line in lines:
-      fields  = line.split('|')
-      account = fields[0]
-      # Remove '-' from user names
-      tmp   = fields[2].split(',')
-      users = []
-      for u in tmp:
-        u2 = u.replace("-","")
-        # Ignore dummy users
-        if not u2 in IGNORED_USERS:
-          users.append(u2)
-    
-      if len(users) > 0 and users[0] != '' and checkAccountName(account):
-        all_accounts.append(account)
-        all_users[account] = users
-
-    # Get the account usage from Gold
-    for account in all_accounts:
-      cmd = "%s/gbalance" % (goldPath)
-      p1 = subprocess.Popen([cmd, '-q', '--show', 'Deposited,Reserved,Available', '--raw', '-p', account],stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-      lines = p1.communicate()[0].strip().split('\n')
-      skip = 0
-      if "does not exist" in lines[0] or "has no connected users" in lines[0]:
-        skip = 1
-      else:
-        try:
-          fields   = lines[0].split('|')
-          quota    = float(fields[0])
-          reserved = float(fields[1])
-          avail    = float(fields[2])
-          usage    = quota - avail - reserved
-
-          if usage == 0.0 and quota == 0.0:
-            skip = 1
-          else:
-            squota   = "%.2f" % (quota/3600.0)
-            susage   = "%.2f" % (usage/3600.0)
-        except:
-          skip = 1
-
-      if not skip:
-        accounts.append(account)
-        account_users[account] = all_users[account]
-        account_quota[account] = squota
-        account_usage[account] = susage
-  else: # Slurm
-    ok = 0
-    # Get the list of all accounts from the quota file
-    if os.path.exists(slurmQuotaFile):
-      account = ""
-      for line in open(slurmQuotaFile):
-        # Remove the ending newline character
-        line = line.rstrip('\n')
-
-        # Process account names
-        if len(line) > 0 and line[0] == '[':
-          # Remove [ and ] from the string
-          account = line.lstrip('[').rstrip(']')
-
-          # Compare the account name with the specified flags
-          ok = checkAccountName(account)
-          if not ok:
-            continue
-
-          # Get the users for this account from Slurm
-          cmd = "sshare --noheader --parsable2 --account=%s --all" % (account)
-          p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-          lines = p.communicate()[0].strip().split('\n')
-          for line in lines:
-            fields  = line.split('|')
-            if len(fields) < 5:
-              continue
-            name    = fields[1]
-            if name != "" and not ('dummy' in name or name[0] == '-'):
-              if not account in accounts:
-                accounts.append(account)
-              if account in account_users:
-                account_users[account].append(name)
-              else:
-                account_users[account] = [name]
-        elif ok: # Process the quota for the last account encountered
-          if "pri" in line and not "non" in line:
-            quota = line.split('=')[1].strip()
-            account_quota[account] = quota
-
-      # Get the usage for each account from Slurm
-      for account in accounts:
-        cmd = 'sshare --noheader --parsable2 --accounts=%s --all' % (account)
-        p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        lines = p.communicate()[0].strip().split('\n')
-
-        # The line without a name contains the total usage
-        for line in lines:
-          fields = line.split('|')
-          if fields[1].strip() == "":
-            iusage = int(fields[4]) / 3600
-            account_usage[account] = "%d" % (iusage)
-
-  return accounts, account_users, account_quota, account_usage
-
-# ******************************************************************************
-
-# Get the name of the user from the "finger" command
-def getName(user):
-  name = ""
-
-  p4 = subprocess.Popen(['finger', user],stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-  lines = p4.communicate()[0].strip().split('\n')
-  if "no such user" in lines[0]:
-    name = "-"
-  else:
-    try:
-      name = lines[0].split("Name:")[1].strip()
-    except Exception, msg:
-      print
-      print user
-      print lines
-      name = ""
-
-  # Decode Unicode string
-  try:
-    str = name.encode('latin1').decode('utf8')
-  except Exception, msg:
-    str = name.encode('latin1', 'ignore').decode('cp1252')
-
-  return str
-
-# ******************************************************************************
-
-# Read the list of projects in the etc directory
-def readAccountList(accountFile):
-  list = []
-
-  if os.path.exists(accountFile):
-    for line in open(accountFile):
-      # Remove the ending newline character
-      line = line.rstrip('\n')
-     
-      # Update the list with the account
-      if len(line) > 0:
-        account = line.lower()
-
-        if notur and ntnu:
-          if (account[:2]!="nn" or account[-1]!="k") and (account[:4]!="ntnu" or account=="ntnusupport"):
-            continue
-        elif notur:
-          if account[:2]!="nn" or account[-1]!="k":
-            continue
-        elif ntnu:
-          if account[:4]!="ntnu" or account=="ntnusupport":
-            continue
-
-        list.append( account )
-
-  return list
+      print("  %-13s\t%-8s\t%5d\t%6d\t%6d\t%6d\t%6d" % (user, stat_per_account[account][user][0], stat_per_account[account][user][1], stat_per_account[account][user][2], stat_per_account[account][user][3], stat_per_account[account][user][4], stat_per_account[account][user][5]))
+    print()
 
 # ******************************************************************************
 
@@ -1507,7 +1301,7 @@ def printReport(entriesCount, stat_per_account):
       samples += entriesCount[category][exe]
 
   if samples == 0:
-    print "Number of samples:", samples
+    print("Number of samples:", samples)
     return
 
   # Today as a number between 0.0 and 1.0, where 0.0 is startDate and 1.0 is 
@@ -1519,10 +1313,10 @@ def printReport(entriesCount, stat_per_account):
   usageinfo_per_account = dict()
   if old_log == 0:
     # Print the header
-    print "Project \tUser    \tFull name               \tCategory\tJobs\tTypical nodes\tMax nodes\tTypical cores\tMax cores\tUsage (K)\tUsage (%)\tQuota (K)\t+/- (K)"
+    print("Project \tUser    \tFull name               \tCategory\tJobs\tTypical nodes\tMax nodes\tTypical cores\tMax cores\tUsage (K)\tUsage (%)\tQuota (K)\t+/- (K)")
 
     # Get account information
-    all_accounts, account_users, account_quota, account_usage = getAccountInfo()
+    all_accounts, account_users, account_quota, account_usage = accountinfo.getInfo()
 
     total_usage = 0.0
     total_quota = 0.0
@@ -1566,7 +1360,7 @@ def printReport(entriesCount, stat_per_account):
     saccount = sorted(quota_per_account, key=lambda k: quota_per_account[k], reverse=True)
   else:
     # Print the header
-    print "Project \tUser    \tFull name               \tCategory\tJobs\tTypical nodes\tMax nodes\tTypical cores\tMax cores"
+    print("Project \tUser    \tFull name               \tCategory\tJobs\tTypical nodes\tMax nodes\tTypical cores\tMax cores")
 
     # Get account information
     accounts = []
@@ -1599,7 +1393,7 @@ def printReport(entriesCount, stat_per_account):
         category = stat_per_account[account][user][0]
         cat = (category[:14] + '.') if len(category) > 14 else category
 
-        print "%-9s\t%-10s\t%-27s\t%-8s\t%4d \t%8d\t%7d \t%8d\t%7d %s" % (account, user, getName(user), cat, stat_per_account[account][user][1], stat_per_account[account][user][2], stat_per_account[account][user][3], stat_per_account[account][user][4], stat_per_account[account][user][5], usageinfo)
+        print("%-9s\t%-10s\t%-27s\t%-8s\t%4d \t%8d\t%7d \t%8d\t%7d %s" % (account, user, userinfo.getName(user), cat, stat_per_account[account][user][1], stat_per_account[account][user][2], stat_per_account[account][user][3], stat_per_account[account][user][4], stat_per_account[account][user][5], usageinfo))
         firstLine = 0
     else:
       user_list = []
@@ -1613,13 +1407,13 @@ def printReport(entriesCount, stat_per_account):
         if max > 3:
           max = 3
         for i in range(max):
-          user_list.append( (users[i], getName(users[i])) )
+          user_list.append( (users[i], userinfo.getName(users[i])) )
 
       for user, name in user_list:
         if not firstLine and old_log == 0:
           usageinfo = "\t \t \t \t"
 
-        print "%-9s\t%-10s\t%-27s\t%-8s\t%4d \t%8d\t%7d \t%8d\t%7d %s" % (account, user, name, "-", 0, 0, 0, 0, 0, usageinfo)
+        print("%-9s\t%-10s\t%-27s\t%-8s\t%4d \t%8d\t%7d \t%8d\t%7d %s" % (account, user, name, "-", 0, 0, 0, 0, 0, usageinfo))
         firstLine = 0
 
   # print totals
@@ -1630,7 +1424,7 @@ def printReport(entriesCount, stat_per_account):
       pct   = "%6.1f" % (100.0 * total_usage / total_quota)
     else:
       pct   = "   0.0 "
-    print "\nTotal    \t        \t                        \t        \t       \t        \t        \t        \t        \t%6s  \t%6s  \t%6s  \t%6s" % (usage, pct, quota, total_diff)
+    print("\nTotal    \t        \t                        \t        \t       \t        \t        \t        \t        \t%6s  \t%6s  \t%6s  \t%6s" % (usage, pct, quota, total_diff))
   
 
 # ******************************************************************************
@@ -1644,7 +1438,7 @@ def printJobSizes(entriesCount, jobs_per_category_per_nodes, jobs_per_category_p
       samples += entriesCount[category][exe]
 
   if samples == 0:
-    print "Number of samples:", samples
+    print("Number of samples:", samples)
     return
 
   min_jobs = 0
@@ -1653,19 +1447,19 @@ def printJobSizes(entriesCount, jobs_per_category_per_nodes, jobs_per_category_p
     try:
       min_jobs = int(jobsize_min)
     except:
-      print "%s is not an integer number" % (jobsize_min)
+      print("%s is not an integer number" % (jobsize_min))
       return
   else:
     try:
       min_pct = float(jobsize_min)
     except:
-      print "%s is not a floating point number" % (jobsize_min)
+      print("%s is not a floating point number" % (jobsize_min))
       return
 
 
-  print "Category           Jobs  Node statistics"
-  print "  Project"
-  print "----------------------------------------"
+  print("Category           Jobs  Node statistics")
+  print("  Project")
+  print("----------------------------------------")
 
   jobs_per_category = dict()
   for category in jobs_per_category_per_nodes:
@@ -1704,7 +1498,7 @@ def printJobSizes(entriesCount, jobs_per_category_per_nodes, jobs_per_category_p
         if pct >= min_pct:
           line = line + " %3d:%4.1f%%" % (nodes, pct)
     if line != "":
-      print "%-17s%6d%s" % (category, jobs_per_category[category], line)
+      print("%-17s%6d%s" % (category, jobs_per_category[category], line))
 
     # Print statistics for individual accounts
     for account in jobs_per_category_per_account_per_nodes[category]:
@@ -1730,13 +1524,13 @@ def printJobSizes(entriesCount, jobs_per_category_per_nodes, jobs_per_category_p
           if pct >= min_pct:
             line = line + " %3d:%4.1f%%" % (nodes, pct)
       if line != "":
-        print "  %-15s%6d%s" % (account, jobs_per_category_per_account[category][account], line)
+        print("  %-15s%6d%s" % (account, jobs_per_category_per_account[category][account], line))
  
 # ************************************* B1 *************************************
 
 def printParallelismHeader(samples, samples_per_day):
-  print "Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y"))
-  print "Number of samples:", samples
+  print("Period: %s - %s" % (datetime.fromtimestamp(startDate).strftime("%b %d %Y"), datetime.fromtimestamp(endDate).strftime("%b %d %Y")))
+  print("Number of samples:", samples)
 
   if samples == 0: return
 
@@ -1776,10 +1570,10 @@ def printParallelismHeader(samples, samples_per_day):
           missing = missing + ", " + text
         else:
           if first_line:
-            print "Missing data: %s" % (missing)
+            print("Missing data: %s" % (missing))
             first_line = 0
           else:
-            print "              %s" % (missing)
+            print("              %s" % (missing))
           missing = text
 
         counting_missing_days = 0
@@ -1788,12 +1582,12 @@ def printParallelismHeader(samples, samples_per_day):
         counting_missing_days = 1
         first_day = day
   if missing == "":
-    print "No missing data"
+    print("No missing data")
   else:
     if first_line:
-      print "Missing data: %s" % (missing)
+      print("Missing data: %s" % (missing))
     else:
-      print "              %s" % (missing)
+      print("              %s" % (missing))
 
 def getBinString():
   if CORE_BINS == 4:
@@ -1814,14 +1608,14 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
 
   nIslands = len(islands)
   if nIslands >= 2 and alloc_errors != "":
-    print
-    print "Node allocation failures."
-    print alloc_errors
+    print()
+    print("Node allocation failures.")
+    print(alloc_errors)
 
   # Print a table with average daily jobs per month
-  print
-  print "Average daily jobs per month. Each job is counted once per day."
-  print "          " + getBinString()
+  print()
+  print("Average daily jobs per month. Each job is counted once per day.")
+  print("          " + getBinString())
   for month in range(len(avg_jobs_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1833,12 +1627,12 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for bin in range(CORE_BINS):
       line = line + "%10d" % (avg_jobs_per_month[month][bin]+0.5)
 
-    print line
+    print(line)
 
   # Print a table with total number of jobs per month
-  print
-  print "Total jobs per month. Each job is counted once per month."
-  print "          " + getBinString()
+  print()
+  print("Total jobs per month. Each job is counted once per month.")
+  print("          " + getBinString())
   for month in range(len(jobs_count_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1850,12 +1644,12 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for bin in range(CORE_BINS):
       line = line + "%10d" % (jobs_count_per_month[month][bin])
 
-    print line
+    print(line)
 
   # Print a table with total number of jobs per month
-  print
-  print "Percentage of jobs per month that at most used %d cores per compute node." % (coresPerNode/2)
-  print "          " + getBinString()
+  print()
+  print("Percentage of jobs per month that at most used %d cores per compute node." % (coresPerNode/2))
+  print("          " + getBinString())
   for month in range(len(memory_jobs_count_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1872,12 +1666,12 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
       else:
         line = line + "%9.1f%%" % (0.0)
 
-    print line
+    print(line)
 
   # Print a table with average daily cores per month
-  print
-  print "Average daily cores per month. Each job is counted once per day."
-  print "          " + getBinString()
+  print()
+  print("Average daily cores per month. Each job is counted once per day.")
+  print("          " + getBinString())
   for month in range(len(avg_cores_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1889,12 +1683,12 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for bin in range(CORE_BINS):
       line = line + "%10.1f" % (avg_cores_per_month[month][bin])
 
-    print line
+    print(line)
 
   # Print a table with total number of jobs per month
-  print
-  print "Total cores per month. Each job is counted once per month."
-  print "          " + getBinString()
+  print()
+  print("Total cores per month. Each job is counted once per month.")
+  print("          " + getBinString())
   for month in range(len(cores_count_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1906,12 +1700,12 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for bin in range(CORE_BINS):
       line = line + "%10d" % (cores_count_per_month[month][bin])
 
-    print line
+    print(line)
 
   # Print a table with total number of jobs per month
-  print
-  print "Total cores per month as pct. The sum of each row is 100%."
-  print "          " + getBinString()
+  print()
+  print("Total cores per month as pct. The sum of each row is 100%.")
+  print("          " + getBinString())
   for month in range(len(cores_count_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -1931,16 +1725,16 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
       for bin in range(CORE_BINS):
         line = line + "%9.1f%%" % (100.0*float(cores_count_per_month[month][bin])/float(sum))
 
-    print line
+    print(line)
 
   # Overall job distribution
-  print
-  print "Overall job distribution. Each sample is counted as 1."
-  print " " + getBinString()
+  print()
+  print("Overall job distribution. Each sample is counted as 1.")
+  print(" " + getBinString())
   line = ""
   for bin in range(CORE_BINS):
     line = line + "%10d" % (sample_dist[bin])
-  print line
+  print(line)
   sum = 0
   for bin in range(CORE_BINS):
     sum = sum + sample_dist[bin]
@@ -1951,35 +1745,35 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
   else:
     for bin in range(CORE_BINS):
       line = line + "%9.1f%%" % (100.0*float(sample_dist[bin])/float(sum))
-  print line
+  print(line)
 
   # Single node jobs
-  print
-  print "Single node jobs. Each sample is counted as 1."
+  print()
+  print("Single node jobs. Each sample is counted as 1.")
   if samples > 0:
-    print "%d / %d = %.1f%%" % (single_jobs, samples, 100.0*float(single_jobs)/float(samples))
+    print("%d / %d = %.1f%%" % (single_jobs, samples, 100.0*float(single_jobs)/float(samples)))
   else:
-    print "no samples."
+    print("no samples.")
 
   # Average cores per single node job
-  print
-  print "Average number of cores per single node job."
-  print "%.1f" % (single_job_core_avg)
+  print()
+  print("Average number of cores per single node job.")
+  print("%.1f" % (single_job_core_avg))
 
   # Islands
   if nIslands >= 2:
-    print
-    print "Number of islands per job. Each job is only counted once."
-    print "     " + getBinString()
+    print()
+    print("Number of islands per job. Each job is only counted once.")
+    print("     " + getBinString())
     for island in range(nIslands):
       line = "%d: " % (island+1)
       for bin in range(CORE_BINS):
         line = line + "%10d" % (islands_per_bin[bin][island])
-      print line
+      print(line)
 
-    print
-    print "Number of islands per job as pct. The sum of each column is 100%."
-    print "     " + getBinString()
+    print()
+    print("Number of islands per job as pct. The sum of each column is 100%.")
+    print("     " + getBinString())
     sum = [0 for x in range(CORE_BINS)]
     for island in range(nIslands):
       for bin in range(CORE_BINS):
@@ -1992,11 +1786,11 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
         else:
           pct = 0.0
         line = line + "%9.1f%%" % (pct)
-      print line
+      print(line)
       
   # Print categories that exist for 2-3 job sizes
-  print
-  print "Software per job size. Software is only shown at its max. job size."
+  print()
+  print("Software per job size. Software is only shown at its max. job size.")
   for bin in range(CORE_BINS):
     if bin == 0:
       line = "1-64:      "
@@ -2033,16 +1827,16 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
           if len(line) < 80:
             line = line + " "
         if len(line) + len(c) > 79:
-          print line
+          print(line)
           first_line = 0
           line = "           "
         line = line + c
         first_category = 0
-    print line
+    print(line)
 
   # Print the accounts that use each software package
-  print 
-  print "The projects that use each software package."
+  print() 
+  print("The projects that use each software package.")
   software_list = []
   for bin in range(CORE_BINS):
     for c in category_list_per_bin[bin]:
@@ -2067,16 +1861,16 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
       if len(newline) <= 79 or p in last_proj and len(newline) <= 80:
         line = newline
       else:
-        print line
+        print(line)
         line = "                      %s" % (p)
     if not first:
-      print line 
+      print(line)
 
   # Print a table with total number of walltime hours per month
-  print
-  print "Total walltime hours. Each job is counted once per month and running jobs"
-  print "are excluded. The sampling-rate affects precision."
-  print "          " + getBinString()
+  print()
+  print("Total walltime hours. Each job is counted once per month and running jobs")
+  print("are excluded. The sampling-rate affects precision.")
+  print("          " + getBinString())
   for month in range(len(walltime_per_month)):
     month_int = startMonth + month
     year_int  = startYear
@@ -2088,8 +1882,8 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for bin in range(CORE_BINS):
       line = line + "%10.0f" % (walltime_per_month[month][bin])
 
-    print line
-  print "--------"
+    print(line)
+  print("--------")
   totals = [ 0.0 for x in range(CORE_BINS)]
   for bin in range(CORE_BINS):
     sum = 0.0
@@ -2106,18 +1900,18 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
   for bin in range(CORE_BINS):
     sum = sum+totals[bin]
     line = line + "%10.0f" % (totals[bin])
-  print line
+  print(line)
   line = "         "
   if sum > 0.0:
     for bin in range(CORE_BINS):
       line = line + "%9.1f%%" % (100.0 * totals[bin] / sum)
-  print line
+  print(line)
 
   # Print a table with registered wall-times
-  print
-  print "Walltimes in hours per job. Each job is counted once and running jobs"
-  print "are excluded. The sampling-rate affects precision."
-  print "        " + getBinString()
+  print()
+  print("Walltimes in hours per job. Each job is counted once and running jobs")
+  print("are excluded. The sampling-rate affects precision.")
+  print("        " + getBinString())
   for w in range(WALLTIME_BINS):
     if w == 0:
       line = "0-12: "
@@ -2131,7 +1925,7 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
     for c in range(CORE_BINS):
       line = line + "%10d" % (walltime_count[c][w])
 
-    print line
+    print(line)
       
   # Print categories that belong to walltime bin 0
   for bin in range(CORE_BINS):
@@ -2179,204 +1973,88 @@ def printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_j
               cores = "2049-4096"
             else:
               cores = "4097-"
-          print
-          print "Distribution of walltime for software that runs on %s cores." % (cores)
-          print "                           0-12     12-24     24-48     48-"
+          print()
+          print("Distribution of walltime for software that runs on %s cores." % (cores))
+          print("                           0-12     12-24     24-48     48-")
 
-        print line
-
-# ******************************************************************************
-
-def user_accounts(username):
-  # get list of user projects
-  if Gold == "1":
-    try:
-      out, err = exec_cmd('%s/glsaccount -u %s -q --show Projects' % (goldPath, username))
-    except:
-      print "An error happened while using a Gold command."
-      sys.exit(1)
-
-    projects = out
-  else:
-    try:
-      out, err = exec_cmd('sacctmgr --noheader --parsable2 show user name=%s withassoc' % (username))
-    except:
-      print "An error happened while using a Slurm command."
-      sys.exit(1)
-
-    projects = []
-    for line in out:
-      account = line.split('|')[4]
-      projects.append(account)
-
-  return(projects)
-
-# ******************************************************************************
-
-def account_users(project):
-  # get list of project users
-  if Gold == "1":
-    try:
-      out, err = exec_cmd('%s/glsproject -q --show Users %s' % (goldPath, project))
-      users = out.rstrip(' ').split(',')
-    except:
-      print "An error happened while using a Gold command."
-      sys.exit(1)
-  else:
-    try:
-      out, err = exec_cmd('sacctmgr --noheader --parsable2 show account name=%s withassoc' % (project))
-      users = []
-      for line in out:
-        user = line.split('|')[5]
-	if user != "":
-          users.append(user)
-    except:
-      print "An error happened while using a Gold command."
-      sys.exit(1)
-
-  return(users)
+        print(line)
 
 # ******************************************************************************
 
 def exec_cmd(cmdline):
-    proc = subprocess.Popen(cmdline, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, err = proc.communicate()
-    if out:
-      out = out.rstrip('\n').split('\n')
-    if err:
-      err = err.rstrip('\n').split('\n')
-    return out, err
-
-# ******************************************************************************
-
-def check_username(username):
-   # check if user does exist
-  if Gold == "1":
-    cmd = '%s/glsuser -q --show Name -u "%s"' % (goldPath, username)
-  else:
-    cmd = 'sacct -u "%s"' % (username)
-
-  out, err = exec_cmd(cmd)
-  if err:
-    print 'Error: user does not exist.'
-    sys.exit(1)
-
-# ******************************************************************************
-
-def set_priv():
-    # set permissions level
-    for group in os.getgroups():
-      try:
-        first_group = grp.getgrgid(group)[0]
-      except:
-        first_group = admGroup
-      if first_group == admGroup or first_group == "root":
-        return 1
-        
-    return 1
-
-# ******************************************************************************
-
-def check_priv(username=None, project=None):
-
-    if project:
-        if not priv:
-            projects = user_accounts(username)
-            for proj in projects:
-                if proj.rstrip() == project:
-                    return None
-            print 'User %s is not connected to account %s on %s.' \
-                % (username, project, machine)
-            sys.exit(4)
-        else:
-            return None
-    elif username:
-        if not priv:
-            own_username = os.environ.get("LOGNAME")
-            if own_username != username:
-                print "You can only check your own account."
-                sys.exit(4)
-        else:
-            return None
-
-    if not priv:
-        print '%s: option not recognized' % sys.argv[0]
-        print 'Try \'%s -h\' for more information.' % sys.argv[0]
-        sys.exit(4)
-    
-    return None 
+  result = subprocess.run([cmdline], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+  out = result.stdout.rstrip('\n').split('\n')
+  err = result.stderr.rstrip('\n').split('\n')
+  return out, err
 
 # ******************************************************************************
 
 # Print the help text
 def usage():
-    print 'Usage: appusage [options]'
-    print 
-    print 'Display executable name/software package and how long it was running on the' 
-    print 'machine for the displayed period. Information about the programs that specific_users'
-    print 'run on compute nodes is gathered at regular intervals. This program writes a'
-    print 'report about that data.'
-    print
-    print 'The names of the executable files are divided into categories that the system'
-    print 'administrators of this computer have made. If you notice a miss classification,'
-    print 'then please notify the system administrators about this.'
-    print
-    print 'The percentages are the number of times that an executable or a group of'
-    print 'executables appear in the recorded data compared with the size of the sample'
-    print 'database. These numbers are thefore not related to the total number of CPU'
-    print 'hours that are available.'
-    print
-    print 'Two numbers are displayed under "Typical/max nodes". The first is the number'
-    print 'of nodes that most frequently was used and the second is the maximum number'
-    print 'of nodes that have been used. Under "Cores/node" is shown the average used'
-    print 'number of cores for the given executable.'
-    print
-    print 'options:'
-    print '  -s, --startDate=     Start date on the format YYYY-MM-DD.'
-    print '  -e, --endDate=       End date on the format YYYY-MM-DD.'
-    print '  -u, --user=          Show only data for a single user.'
-    print '  -U, --users          Show a list over what software that each user is using.'
-    print '  -p, --project=       Show only data for a single project.'
-    print '  -E, --exe=           Show all users that have used a specific executable.'
-    print '  -r, --raw            Show raw numbers instead of percentages.'
-    print '  -c, --cores          Show the average number of cores used per job per user'
-    print '                       per project.'
-    print '  --report             Produce a spreadsheet with project statistics'
-    print '  --notur              Only include Notur accounts'
-    print '  --ntnu               Only include NTNU accounts'
-    print '  --jobsizes=          Shows a list with job sizes for each category.'
-    print '                       Argument is min. number of jobs required per job size.'
-    print '                       Detault is pct, but actual number if --raw is specified.'
-    print '  --period=            Shows data from the specified period(s).'
-    print '  --periods=           Example: --periods=2016.2,2017.1'
-    print '  --parallel           Shows info about the parallelism of the jobs'
+    print('Usage: appusage [options]')
+    print()
+    print('Display executable name/software package and how long it was running on the')
+    print('machine for the displayed period. Information about the programs that specific_users')
+    print('run on compute nodes is gathered at regular intervals. This program writes a')
+    print('report about that data.')
+    print()
+    print('The names of the executable files are divided into categories that the system')
+    print('administrators of this computer have made. If you notice a miss classification,')
+    print('then please notify the system administrators about this.')
+    print()
+    print('The percentages are the number of times that an executable or a group of')
+    print('executables appear in the recorded data compared with the size of the sample')
+    print('database. These numbers are thefore not related to the total number of CPU')
+    print('hours that are available.')
+    print()
+    print('Two numbers are displayed under "Typical/max nodes". The first is the number')
+    print('of nodes that most frequently was used and the second is the maximum number')
+    print('of nodes that have been used. Under "Cores/node" is shown the average used')
+    print('number of cores for the given executable.')
+    print()
+    print('options:')
+    print('  -s, --startDate=     Start date on the format YYYY-MM-DD.')
+    print('  -e, --endDate=       End date on the format YYYY-MM-DD.')
+    print('  -u, --user=          Show only data for a single user.')
+    print('  -U, --users          Show a list over what software that each user is using.')
+    print('  -p, --project=       Show only data for a single project.')
+    print('  -E, --exe=           Show all users that have used a specific executable.')
+    print('  -r, --raw            Show raw numbers instead of percentages.')
+    print('  -c, --cores          Show the average number of cores used per job per user')
+    print('                       per project.')
+    print('  --report             Produce a spreadsheet with project statistics')
+    print('  --jobsizes=          Shows a list with job sizes for each category.')
+    print('                       Argument is min. number of jobs required per job size.')
+    print('                       Default is pct, but actual number if --raw is specified.')
+    print('  --period=            Shows data from the specified period(s).')
+    print('  --periods=           Example: --periods=2016.2,2017.1')
+    print('  --parallel           Shows info about the parallelism of the jobs')
 
-    print '  -h                   Show this help message and exit.'
+    print('  -h                   Show this help message and exit.')
 
 # ******************************************************************************
 
 # Main
 def main():
   global startDate, endDate, username
-  global priv, notur, ntnu 
+  global priv
   global jobsize_min, print_date, old_log
   global specific_exe, specific_users, specific_projects
   global raw_mode, users_mode, report_mode, cores_mode, jobsize_mode
   global parallel_mode, default_mode
+  global categories
 
   logDir  = rootDir + "log/"
   logDirs = [ logDir ]
 
   # Get the command line options
   try:
-    opts, args = getopt.getopt(sys.argv[1:], "s:e:u:Up:P:E:hHgrR:c", ["startDate=", "endDate=", "user=", "users", "project=", "period=", "periods=", "exe=", "help", "generate", "raw", "cores", "report", "notur", "ntnu", "jobsizes=", "parallel"])
+    opts, args = getopt.getopt(sys.argv[1:], "s:e:u:Up:P:E:hHgrR:c", ["startDate=", "endDate=", "user=", "users", "project=", "period=", "periods=", "exe=", "help", "generate", "raw", "cores", "report", "jobsizes=", "parallel"])
   except getopt.GetoptError as err:
     # print help information and exit:
-    print 'Error: %s' % (str(err))
-    print 'Try \'appusage -h\' for more information.'
+    print('Error: %s' % (str(err)))
+    print('Try \'appusage -h\' for more information.')
     sys.exit(2)
-
-  priv = set_priv()
 
   specific_users = []
   specific_projects = []
@@ -2394,8 +2072,9 @@ def main():
     elif o in ('-p', '--project'):
       # find the user name of the person using appusage
       username = os.environ.get("LOGNAME")
+
       # check whether this user is a member of the project
-      check_priv(username, a)
+      accountinfo.check_priv(username, a)
 
       # add this project to the list of specific_projects
       specific_projects.append(a)
@@ -2417,8 +2096,16 @@ def main():
         old_log = 1
 
         if not os.path.exists(logDir):
-          print "Error: no log data exists for " + period
+          print("Error: no log data exists for " + period)
           sys.exit(2)
+
+        # Update the list of categories
+        categoryFile = logDir + 'category-list'
+        if os.path.exists(categoryFile):
+          for line in open(categoryFile):
+            category = line.rstrip('\n')
+            if not category in categories:
+              categories.append( category )
 
         start = period.find('.') - 2
         end   = start + 2
@@ -2431,8 +2118,8 @@ def main():
           n = -1
         if n != 1 and n != 2:
           # print help information and exit:
-          print 'Error: wrong period format. Example: 2017.1'
-          print 'Try \'appusage -h\' for more information.'
+          print('Error: wrong period format. Example: 2017.1')
+          print('Try \'appusage -h\' for more information.')
           sys.exit(2)
 
         if n == 1:
@@ -2466,10 +2153,6 @@ def main():
       cores_mode = 1
     elif o in ('--report'):
       report_mode = 1
-    elif o in ('--notur'):
-      notur = 1
-    elif o in ('--ntnu'):
-      ntnu = 1
     elif o in ('--jobsizes'):
       jobsize_mode = 1
       jobsize_min = a
@@ -2485,8 +2168,8 @@ def main():
       print_date = 1
       pass # do nothing, since the if-statement below will now not be entered
     else:
-      print "Error: unrecognized option '%s'" % (o)
-      print 'Try \'appusage -h\' for more information.'
+      print("Error: unrecognized option '%s'" % (o))
+      print('Try \'appusage -h\' for more information.')
       sys.exit(2)
 
   # Check for start date and end date last, so that the defaults set in the
@@ -2497,8 +2180,8 @@ def main():
         startDate = float(time.mktime( time.strptime(a, "%Y-%m-%d") ))
       except:
         # print help information and exit:
-        print 'Error: wrong date format for option %s' % (o)
-        print 'Try \'appusage -h\' for more information.'
+        print('Error: wrong date format for option %s' % (o))
+        print('Try \'appusage -h\' for more information.')
         sys.exit(2)
     elif o in ('-e', '--endDate'):
       try: 
@@ -2509,8 +2192,8 @@ def main():
         endDate = float(time.mktime( new_t ))
       except:
         # print help information and exit:
-        print 'Error: wrong date format for option %s' % (o)
-        print 'Try \'appusage -h\' for more information.'
+        print('Error: wrong date format for option %s' % (o))
+        print('Try \'appusage -h\' for more information.')
         sys.exit(2)
 
   # if no options and the output file exists, then just show that file
@@ -2546,7 +2229,7 @@ def main():
     printParallelism(samples, avg_jobs_per_month, jobs_count_per_month, memory_jobs_count_per_month, avg_cores_per_month, cores_count_per_month, sample_dist, single_jobs, single_job_core_avg, category_list_per_bin, category_projects, islands_per_bin, alloc_errors, walltime_per_month, walltime_count, walltime_dist)
 
   if print_date:
-    print "Generated on %s %s." % (str(date.today()), time.strftime("%H:%M:%S"))
+    print("Generated on %s %s." % (str(date.today()), time.strftime("%H:%M:%S")))
 
 # ******************************************************************************
 
