@@ -1,11 +1,13 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Hostlist library
 #
-# Copyright (C) 2008 Kent Engström <kent@nsc.liu.se>,
-#                    Thomas Bellman <bellman@nsc.liu.se> and
-#                    Pär Andersson <paran@nsc.liu.se>,
+# Copyright (C) 2008-2018
+#                    Kent Engström <kent@nsc.liu.se>,
+#                    Thomas Bellman <bellman@nsc.liu.se>,
+#                    Pär Lindfors <paran@nsc.liu.se> and
+#                    Torbjörn Lönnemark <ketl@nsc.liu.se>,
 #                    National Supercomputer Centre
 # 
 # This program is free software; you can redistribute it and/or modify
@@ -34,10 +36,17 @@ corner cases the behaviour of this module have not been compared for
 compatibility with pdsh/dshbak/SLURM et al.
 """
 
-__version__ = "1.14"
+__version__ = "1.23.0"
 
 import re
 import itertools
+
+# Replace range with xrange on Python 2, do nothing on Python 3 (where xrange
+# does not exist, and range returns an iterator)
+try:
+    range = xrange
+except:
+    pass
 
 # Exception used for error reporting to the caller
 class BadHostlist(Exception): pass
@@ -74,12 +83,12 @@ def expand_hostlist(hostlist, allow_duplicates=False, sort=False):
         elif c == "]": bracket_level -= 1
 
         if bracket_level > 1:
-            raise BadHostlist, "nested brackets"
+            raise BadHostlist("nested brackets")
         elif bracket_level < 0:
-            raise BadHostlist, "unbalanced brackets"
+            raise BadHostlist("unbalanced brackets")
 
     if bracket_level > 0:
-        raise BadHostlist, "unbalanced brackets"
+        raise BadHostlist("unbalanced brackets")
 
     if not allow_duplicates:
         results = remove_duplicates(results)
@@ -116,7 +125,7 @@ def expand_part(s):
     # Combine our list with the list from the expansion of the rest
     # (but guard against too large results first)
     if len(us_expanded) * len(rest_expanded) > MAX_SIZE:
-        raise BadHostlist, "results too large"
+        raise BadHostlist("results too large")
 
     return [us_part + rest_part
             for us_part in us_expanded
@@ -142,7 +151,7 @@ def expand_range(prefix, range_):
     # Otherwise split low-high
     m = re.match(r'^([0-9]+)-([0-9]+)$', range_)
     if not m:
-        raise BadHostlist, "bad range"
+        raise BadHostlist("bad range")
 
     (s_low, s_high) = m.group(1,2)
     low = int(s_low)
@@ -150,12 +159,12 @@ def expand_range(prefix, range_):
     width = len(s_low)
 
     if high < low:
-        raise BadHostlist, "start > stop"
+        raise BadHostlist("start > stop")
     elif high - low > MAX_SIZE:
-        raise BadHostlist, "range too large"
+        raise BadHostlist("range too large")
 
     results = []
-    for i in xrange(low, high+1):
+    for i in range(low, high+1):
         results.append("%s%0*d" % (prefix, width, i))
     return results
 
@@ -198,7 +207,7 @@ def collect_hostlist(hosts, silently_discard_bad = False):
             if silently_discard_bad:
                 continue
             else:
-                raise BadHostlist, "forbidden character"
+                raise BadHostlist("forbidden character")
 
         left_right.append((host, ""))
 
@@ -254,7 +263,33 @@ def collect_hostlist_1(left_right):
     # num_int (numerically), then...
     # This determines the order of the final result.
 
-    sortlist.sort()
+    def sort_key(entry):
+        """
+        Sort sortlist entries without causing TypeError in Python 3.
+
+        Prefix is always present and a string.
+
+        If suffix is None, use the empty string. The empty string will sort
+        before all other strings (as None did in Python 2).
+
+        If num_int is None, use -1 instead. -1 sorts before all *possible*
+        numbers (as None did in Python 2). Negative numbers cannot be present
+        in a hostlist.
+
+        If num_width is None, use -1 instead. As before, -1 sorts before all
+        possible widths. An actual num_width of 0 should not be possible, so we
+        could technically use 0, but using -1 doesn't hurt, so we might as well
+        use that instead.
+        """
+        ((prefix, suffix), num_int, num_width, host) = entry
+        return (
+            (prefix, '' if suffix is None else suffix),
+            -1 if num_int is None else num_int,
+            -1 if num_width is None else num_width, host
+        )
+
+
+    sortlist.sort(key=sort_key)
 
     # We are ready to collect the result parts as a list of new (left,
     # right) tuples.
@@ -342,15 +377,28 @@ def numerically_sorted(l):
 
     return sorted(l, key=numeric_sort_key)
 
-nsk_re = re.compile("([0-9]+)|([^0-9]+)")
+numeric_sort_key_regexp = re.compile("([0-9]+)|([^0-9]+)")
 def numeric_sort_key(x):
-    return [handle_int_nonint(i_ni) for i_ni in nsk_re.findall(x)]
+    """Compose a sorting key to compare strings "numerically":
 
-def handle_int_nonint(int_nonint_tuple):
-    if int_nonint_tuple[0]:
-        return int(int_nonint_tuple[0])
-    else:
-        return int_nonint_tuple[1]
+    We split numerical (integer) and non-numerical parts into a list,
+    making sure that the numerical parts are converted to Python ints,
+    and then sort on the lists. Thus, if we sort x10y and x9z8, we will
+    compare ["x", 10, "y"] with ["x", 9, "x", "8"] and return x9z8
+    before x10y".
+
+    Python 3 complication: We cannot compare int and str, so while we can
+    compare x10y and x9z8, we cannot compare x10y and 9z8. Kludge: insert
+    a blank string first if the list would otherwise start with an integer.
+    This will give the same ordering as before, as integers seem to compare
+    smaller than strings in Python 2.
+    """
+
+    keylist = [int(i_ni[0]) if i_ni[0] else i_ni[1]
+               for i_ni in numeric_sort_key_regexp.findall(x)]
+    if keylist and isinstance(keylist[0], int):
+        keylist.insert(0, "")
+    return keylist
 
 # Parse SLURM_TASKS_PER_NODE into a list of task numbers
 #
@@ -376,11 +424,11 @@ def parse_slurm_tasks_per_node(s):
             else:
                 repetitions = int(repetitions)
             if repetitions > MAX_SIZE:
-                raise BadHostlist, "task list repetitions too large"
+                raise BadHostlist("task list repetitions too large")
             for i in range(repetitions):
                 res.append(tasks)
         else:
-            raise BadHostlist, "bad task list syntax"
+            raise BadHostlist("bad task list syntax")
     return res
 
 #

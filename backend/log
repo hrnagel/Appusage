@@ -1,15 +1,18 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This program stores the information about the running processes on an AIX
 # compute node in a file.
 
-from subprocess import Popen, PIPE
-from fnmatch import fnmatch
-import sys
-import os
+import os, sys, subprocess
 import time
 import multiprocessing
-import ConfigParser
+import configparser
+
+# Get the path to 'lib' and add it to Python's search path
+lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
+sys.path.insert(0, lib_path)
+
+import appinfo
 
 # Ignored users/programs do not show up on reports. Allowed users
 # do show up, but are not required to have a connected job.
@@ -20,18 +23,25 @@ rootDir         = ""
 ignoredUsers    = []
 ignoredPrograms = []
 allowedUsers    = []
-checkCategory   = []
+checkCategories = []
 coresPerNode    = 0
 
 
 # ******************************************************************************
 
 def init():
-  global hostName, rootDir, ignoredUsers, ignoredPrograms, allowedUsers, checkCategory, coresPerNode
+  global hostName, rootDir, ignoredUsers, ignoredPrograms, allowedUsers, checkCategories, coresPerNode, softwareDirs, softwareDirPatterns
 
   # Get the current host name
-  p1 = Popen(['hostname'], stdout=PIPE)
-  hostName = p1.communicate()[0].strip().split('.')[0]
+  result = subprocess.run(
+    ["hostname"],
+    shell=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+    check=True,  # Optional: raises CalledProcessError if return code != 0
+  )
+  hostName = result.stdout.strip().split('.')[0]
 
   # Get the root directory, where this script is located
   relPath = os.path.dirname(sys.argv[0])
@@ -42,7 +52,7 @@ def init():
     absPath = absPath.rstrip('/')
 
   # Remove the bin directory
-  if absPath.endswith('bin2'):
+  if absPath.endswith('backend'):
     absPath = os.path.dirname(absPath)
 
   # Make certain that the path ends with a '/'
@@ -52,7 +62,7 @@ def init():
   rootDir = absPath
 
   # Read info from config file
-  config = ConfigParser.ConfigParser()
+  config = configparser.ConfigParser()
   config.read(rootDir+'etc/config')
   list = config.get('Log', 'ignoredUsers').strip().split(',')
   for item in list:
@@ -63,15 +73,17 @@ def init():
   list = config.get('Log', 'allowedUsers').strip().split(',')
   for item in list:
     allowedUsers.append(item.strip())
-  list = config.get('Log', 'checkCategory').strip().split(',')
+  list = config.get('Log', 'checkCategories').strip().split(',')
   for item in list:
-    checkCategory.append(item.strip())
+    checkCategories.append(item.strip())
   hyperThreading = config.get('Log', 'hyperThreading').strip()
 
   # Set the number of cores per node
   coresPerNode = multiprocessing.cpu_count()
   if hyperThreading == '1':
     coresPerNode = coresPerNode / 2
+
+  appinfo.init(config, "Log", rootDir)
 
 
 # ******************************************************************************
@@ -110,12 +122,19 @@ def getJobList(filename, hostname):
   # Check if the file with the job lists exists
   if os.path.exists(filename):
     # Check for file corruption
-    p1 = Popen(['file', '-b', filename],stdout=PIPE)
-    output = p1.communicate()[0].strip()
+    result = subprocess.run(
+      ['file -b %s' % (filename)],
+      shell=True,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+      check=True,  # Optional: raises CalledProcessError if return code != 0
+    )
+    output = result.stdout.strip()
 
-    if not "ASCII text" in output:
+    if not "ASCII text" in output and not "CSV text" in output:
       # Write a warning about the corrupted file
-      iFileName = rootDir+"log/"+hostname+".illegal"
+      iFileName = rootDir+"log/"+hostname+".err"
       file = open(iFileName, "w")
       file.write(hostname+": Unable to read "+filename+"\n")
       file.close()
@@ -146,30 +165,27 @@ def getJobInfo(joblist, userid):
 
 # ******************************************************************************
 
-# Finds the name of the application to which the executable belongs
-def getAppName(path, mappings):
-  for pattern, app in mappings:
-    if fnmatch(path, pattern):
-      return app
-
-  return "OTHER"
-
-# ******************************************************************************
-
 # Get a list of information about the processes currently running on this
 # compute node
-def getProcessInfo(hostname, mappings, jobList):
-  pinfo   = dict()
-  illegal = []
+def getProcessInfo(hostname, jobList):
+  known   = dict()
+  unknown = []
 
   # Get the list of running processes
-  p1 = Popen(['ps', 'H', '-e', '-opid=,user:20=,pcpu=,comm='],stdout=PIPE)
-  psLines = p1.communicate()[0].strip()
+  result = subprocess.run(
+    ['ps -H -e -opid=,user:20=,pcpu=,comm='],
+    shell=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+    check=True,  # Optional: raises CalledProcessError if return code != 0
+  )
+  psLines = result.stdout.strip()
 
   # Get the current time in seconds
   now = str(time.time())
 
-  # Fill pinfo with information about all running processes
+  # Fill known with information about all running processes
   for line in psLines.split('\n'):
     # Get the information about a single process
     try:
@@ -197,35 +213,35 @@ def getProcessInfo(hostname, mappings, jobList):
     if exe in ignoredPrograms:
       continue
 
-    # Store information about illegal processes and then skip it
+    # Store information about an unknown process and then skip it
     jobid, nodeCount, account = getJobInfo(jobList, user)
     if not nodeCount:
-      appName = getAppName(path, mappings)
+      appName = appinfo.getAppName(path)
       x = [hostname, user, pid, appName, exe]
-      if not x in illegal:
-        illegal.append(x)
+      if not x in unknown:
+        unknown.append(x)
       continue
 
-    # Skip the PBS processes
+    # Skip job scheduler processes
     if pcpu == "0.0":
       continue
 
     efficiency = float(pcpu)
 
-    # Store the information in pinfo
-    if exe in pinfo:
-      pinfo[exe][2] += efficiency
-      pinfo[exe][3] += 1
+    # Store the information in known
+    if exe in known:
+      known[exe][2] += efficiency
+      known[exe][3] += 1
     else:
-      appName = getAppName(path, mappings)
-      pinfo[exe] = [now, user, efficiency, 1, appName, path, jobid, nodeCount, account]
+      appName = appinfo.getAppName(path)
+      known[exe] = [now, user, efficiency, 1, appName, path, jobid, nodeCount, account]
 
-  return pinfo, illegal
+  return known, unknown
 
 # ******************************************************************************
 
 # Store the latest information, while correcting previous errors
-def storeInfo(pinfo, illegal, fileName, mappings):
+def writeLogData(known, unknown, fileName):
   fileExists = os.path.exists(fileName)
 
   # Read all the previous entries in the current log file
@@ -233,26 +249,28 @@ def storeInfo(pinfo, illegal, fileName, mappings):
     logEntries = list();
     for line in open(fileName):
       fields = line.rstrip('\n').split(':')
-      # Add missing fields from previous versions of this script
-      while len(fields) < 9:
-        fields.append("")
       # Only add lines that are not corrupted
-      if fields[0] != "" and fields[1] != "" and fields[2] != "" and fields[3] != "":
+      ok = all(f != "" and all(ord(c) >= 32 for c in f) for f in fields)
+      # First character must be a number
+      if ok:
+        ok = fields[0][0].isdigit()
+      # Add the log entry
+      if ok:
         logEntries.append(fields)
 
   # Rewrite all information to the log file
   file = open(fileName, "w")
 
-  # Store all old entries in the log file, while reclassifying the OTHER entries
+  # Store all old entries in the log file, while reclassifying the unknown entries
   if fileExists:
     for time,user,eff,app,path,jobid,nodeCount,coreCount,account in logEntries:
-      if app in checkCategory:
-        app = getAppName(path, mappings)
+      if app in checkCategories:
+        app = appinfo.getAppName(path)
       file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (time, user, eff, app, path, jobid, nodeCount, coreCount, account))
 
   # Store all new entries in the log file
-  for exe in pinfo:
-    info = pinfo[exe]
+  for exe in known:
+    info = known[exe]
 
     # In the case where users use SMT and e.g. run with 32 processes on a node,
     # then one must divide by the number of cores per node: 16
@@ -262,23 +280,23 @@ def storeInfo(pinfo, illegal, fileName, mappings):
     file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], info[7], cores, info[8]))
   file.close()
 
-  # Store information about illegal processes on this node 
-  iFileName = fileName+".illegal"
-  if len(illegal) == 0:
-    # Delete the file hostname.illegal, if there are no illegal processes
+  # Store information about unknown processes on this node 
+  iFileName = fileName+".err"
+  if len(unknown) == 0:
+    # Delete the file hostname.err, if there are no unknown processes
     if os.path.exists(iFileName):
       os.remove(iFileName)
   else:
     lines = ""
-    for host, user, pid, appName, exe in illegal:
+    for host, user, pid, appName, exe in unknown:
       if not user in allowedUsers:
         lines = lines + "%s: %s, %s, %s, %s\n" % (host, pid, user, appName, exe)
     if lines == "":
-      # Delete the file hostname.illegal, if there are no illegal processes
+      # Delete the file hostname.err, if there are no unknown processes
       if os.path.exists(iFileName):
         os.remove(iFileName)
     else:
-      file = open(fileName+".illegal", "w")
+      file = open(fileName+".err", "w")
       file.write(lines)
       file.close()
 
@@ -292,15 +310,11 @@ def storeInfo(pinfo, illegal, fileName, mappings):
 # Read global variables
 init()
 
-# Read the list of mappings from executable names to application names
-# from the configuration file.
-mappings = getAppMappings(rootDir + 'etc/categories')
-
 # Read the list of jobs that should be running on this node
 jobList = getJobList(rootDir+"log/joblist", hostName)
 
 # Get information about the processes currently running on this compute node
-pinfo, illegal = getProcessInfo(hostName, mappings, jobList)
+known, unknown = getProcessInfo(hostName, jobList)
 
 # Store the process information in a file 
-storeInfo(pinfo, illegal, rootDir + "log/" + hostName, mappings)
+writeLogData(known, unknown, rootDir + "log/" + hostName)

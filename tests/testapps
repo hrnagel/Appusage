@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+
+import os, sys
+import configparser
+
+# Get the path to 'lib' and add it to Python's search path
+lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
+sys.path.insert(0, lib_path)
+
+import appinfo
+
+def init():
+  # Get the root directory, where this script is located
+
+  # Follow a symbolic link
+  relPath = os.path.realpath(sys.argv[0])
+
+  # Strip program name
+  relPath = os.path.dirname(relPath)
+  absPath = os.path.abspath(relPath)
+
+  # Remove the ending '/'
+  if absPath.endswith('/'):
+    absPath = absPath.rstrip('/')
+
+  # Remove the bin directory
+  if absPath.endswith('tests'):
+    absPath = os.path.dirname(absPath)
+
+  # Make certain that the path ends with a '/'
+  if not absPath.endswith('/'):
+    absPath += '/'
+
+  file = absPath + 'etc/config'
+
+  # Read info from config file
+  config = configparser.ConfigParser()
+  config.read(file)
+
+  appinfo.init(config, "Log", absPath)
+
+# Main
+def main():
+  path = "/cluster/software/NRIS/zen5/software/LAMMPS/22Jul2025_update2-foss-2024a-kokkos/bin/lmp"
+  print('getAppName("%s") = %s' % (path, appinfo.getAppName(path)))
+
+if __name__ == "__main__":
+  init()
+  main()

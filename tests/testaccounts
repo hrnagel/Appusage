@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+
+import os, sys
+import configparser
+
+# Get the path to 'lib' and add it to Python's search path
+lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
+sys.path.insert(0, lib_path)
+
+import accountinfo
+
+def init():
+  # Get the root directory, where this script is located
+
+  # Follow a symbolic link
+  relPath = os.path.realpath(sys.argv[0])
+
+  # Strip program name
+  relPath = os.path.dirname(relPath)
+  absPath = os.path.abspath(relPath)
+
+  # Remove the ending '/'
+  if absPath.endswith('/'):
+    absPath = absPath.rstrip('/')
+
+  # Remove the bin directory
+  if absPath.endswith('tests'):
+    absPath = os.path.dirname(absPath)
+
+  # Make certain that the path ends with a '/'
+  if not absPath.endswith('/'):
+    absPath += '/'
+
+  file = absPath + 'etc/config'
+
+  # Read info from config file
+  config = configparser.ConfigParser()
+  config.read(file)
+
+  return accountinfo.init(config, "Appusage")
+
+# Main
+def main():
+  accounts, account_users, account_quota, account_usage = accountinfo.getInfo()
+
+  if not "nn9997k" in accounts:
+    print("Error: nn9997k is not in accounts")
+  else:
+    print('account_quota["nn9997k"] = %s' % (account_quota["nn9997k"]))
+    print('account_usage["nn9997k"] = %s' % (account_usage["nn9997k"]))
+
+  print("Users in nn9997k:")
+  print(accountinfo.getUsers("nn9997k"))
+
+  print('Checking the user "thomarob":')
+  accountinfo.check_username("thomarob")
+  print("user ok")
+
+  print("thomarob user accounts:")
+  print(accountinfo.user_accounts("thomarob"))
+
+  print("Can hrn check nn8127k?")
+  accountinfo.check_priv("hrn", "nn8127k")
+  print("ok")
+
+  print("Can you check thomarob?")
+  accountinfo.check_priv("thomarob")
+  print("ok")
+
+
+if __name__ == "__main__":
+  # Read global variables
+  ok = init()
+
+  if ok:
+    main()

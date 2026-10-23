@@ -1,0 +1,6 @@
+#!/bin/bash
+
+root="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; dirname `pwd -P` )"
+
+# Create the job list
+$root/backend/jobs

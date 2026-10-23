@@ -1,15 +1,15 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # This program stores the information about the running processes on an AIX
 # compute node in a file.
 
-from subprocess import Popen, PIPE
 from fnmatch import fnmatch
+import subprocess
 import sys
 import os
 import time
 from hostlist import expand_hostlist
-import ConfigParser
+import configparser
 
 # Global variables (do not edit)
 rootDir         = ''
@@ -33,7 +33,7 @@ def init():
     absPath = absPath.rstrip('/')
 
   # Remove the bin directory
-  if absPath.endswith('bin2'):
+  if absPath.endswith('backend'):
     absPath = os.path.dirname(absPath)
 
   # Make certain that the path ends with a '/'
@@ -43,7 +43,7 @@ def init():
   rootDir = absPath
 
   # Read info from config file
-  config = ConfigParser.ConfigParser()
+  config = configparser.ConfigParser()
   config.read(rootDir+'etc/config')
 
   if config.has_option("Jobs", "pbs"):
@@ -59,6 +59,8 @@ def init():
 
 # Stores information about a job
 def updateLists(jobid, userid, nodes, account):
+  global nodesSeenBefore, simpleNodeList, nodeInfo
+
   # do not store jobs that are not running
   if len(nodes) == 1 and nodes[0][0] == '-':
     return
@@ -82,8 +84,15 @@ def updateLists(jobid, userid, nodes, account):
 # Finds (job, user, node) for all running jobs
 def getJobInfo_PBS():
   # Get the list of runnning jobs for this user
-  p1 = Popen(['qstat', '-wtn1'], stdout=PIPE)
-  jobs = p1.communicate()[0].strip().split('\n');
+  result = subprocess.run(
+    ["qstat -wtn1"],
+    shell=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+    check=True,  # Optional: raises CalledProcessError if return code != 0
+  )
+  jobs = result.stdout.strip().split('\n')
 
   # Check each job that this user has running right now, while skipping the 
   # 4 line header
@@ -97,8 +106,15 @@ def getJobInfo_PBS():
     status = info[9]
 
     # Find the value of Account_Name
-    p1 = Popen(['qstat', '-f', jobid], stdout=PIPE)
-    lines = p1.communicate()[0].strip().split('\n');
+    result = subprocess.run(
+      ["qstat -f %s" % jobid],
+      shell=True,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+      check=True,  # Optional: raises CalledProcessError if return code != 0
+    )
+    lines = result.stdout.strip().split('\n')
 
     account = ''
     for line in lines:
@@ -119,8 +135,15 @@ def getJobInfo_PBS():
 # Finds (job, user, node) for all running jobs
 def getJobInfo_SLURM():
   # Get the list of runnning jobs for this user
-  p1 = Popen(['squeue', '-ho', '%i:%u:%t:%N:%a'], stdout=PIPE)
-  jobs = p1.communicate()[0].strip().split('\n');
+  result = subprocess.run(
+    ["squeue -ho %i:%u:%t:%N:%a"],
+    shell=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
+    check=True,  # Optional: raises CalledProcessError if return code != 0
+  )
+  jobs = result.stdout.strip().split('\n')
 
   # Check each job that this user has running right now
   for i in range(0, len(jobs)):
@@ -155,6 +178,8 @@ def getJobInfo():
 
 # Store a line for each node in a file
 def storeNodeInfo(fileName):
+  global simpleNodeList, nodeInfo
+
   # Rewrite all information to the log file
   file = open(fileName, "w")
 

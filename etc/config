@@ -1,0 +1,20 @@
+[Jobs]
+slurm = 1
+
+[Log]
+ignoredUsers    = root, sshd, dbus, chrony, polkitd, munge, ganglia, ntp, rpcuser, rpc, mysql, slurm, postfix, sonar, cvmfs, prometheus
+IgnoredPrograms = srun, slurm_script, mpiexec.hydra, pmi_proxy, sshd, bash, top, orterun, orted, less, screen, ssh-agent, man, node_exporter
+allowedUsers    = 
+checkCategories = Unknown
+hyperThreading  = 0
+softwareDirs    = /cluster/software/NRIS/zen5/software/, /cvmfs/software.eessi.io/versions/2023.06/software/linux/x86_64/amd/zen4/software/, /cvmfs/software.eessi.io/versions/2025.06/software/linux/x86_64/amd/zen5/software/, /cvmfs/software.eessi.io/versions/2026.06/software/linux/x86_64/amd/zen5/software/
+
+[Appusage]
+startDate      = 261001
+endDate        = 270331
+machine        = olivia
+nodesRegex     = c[0-9]*
+admGroup       = sysapp
+slurmQuotaFile = /cluster/var/accounting/projects.toml
+userNamesFile  = /cluster/var/user_info.toml
+coresPerNode   = 256
