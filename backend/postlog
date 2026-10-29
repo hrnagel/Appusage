@@ -2,16 +2,7 @@
 
 root="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; dirname `pwd -P` )"
 
-# Create the categories file
-rm -rf /tmp/appusage-tmp
-touch /tmp/appusage-tmp
-for f in `ls $root/log/c* | grep -v illegal | grep -v category-list`
-do
-   cat $f | cut -d':' -f4 | sort | uniq >> /tmp/appusage-tmp
-done
-sort /tmp/appusage-tmp | uniq | grep "\S" > $root/log/category-list
-rm /tmp/appusage-tmp
-
 # Create the output file
+rm -rf /tmp/appusage-tmp
 $root/bin/appusage -g > /tmp/appusage-tmp
 mv /tmp/appusage-tmp $root/log/output

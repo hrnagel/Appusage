@@ -2,7 +2,7 @@
 slurm = 1
 
 [Log]
-ignoredUsers    = root, sshd, dbus, chrony, polkitd, munge, ganglia, ntp, rpcuser, rpc, mysql, slurm, postfix, sonar, cvmfs, prometheus
+ignoredUsers    = root, sshd, dbus, chrony, polkitd, munge, ganglia, ntp, rpcuser, rpc, mysql, slurm, postfix, sonar, cvmfs, prometheus, messagebus, nscd
 IgnoredPrograms = srun, slurm_script, mpiexec.hydra, pmi_proxy, sshd, bash, top, orterun, orted, less, screen, ssh-agent, man, node_exporter
 allowedUsers    = 
 checkCategories = Unknown

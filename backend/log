@@ -13,6 +13,7 @@ lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
 sys.path.insert(0, lib_path)
 
 import appinfo
+import joblist
 
 # Ignored users/programs do not show up on reports. Allowed users
 # do show up, but are not required to have a connected job.
@@ -85,89 +86,18 @@ def init():
 
   appinfo.init(config, "Log", rootDir)
 
+  ok = joblist.init(config)
+  if ok:
+    # Read the list of jobs that should be running on this node
+    joblist.read(rootDir+"log/joblist", hostName)
 
-# ******************************************************************************
-
-# Read a list of mappings from executable name to application name from the
-# configuration file
-def getAppMappings(cfgFile):
-  map = []
-
-  if os.path.exists(cfgFile):
-    for line in open(cfgFile):
-      # Remove the ending newline character
-      line = line.rstrip('\n')
-
-      # Split the line into tab separated words
-      words = line.split('\t')
-      if len(words) < 2: # Skip empy lines
-        continue
-      
-      # Multiple tabs separate the pattern and the appname, so store 
-      # the first and the last word in a tuple
-      mapping = (words[0].strip(), words[len(words)-1].strip())
-
-      map.append(mapping)
-
-  return map
-
-# ******************************************************************************
-
-# Reads a list of jobs running on this node from a file
-# This list should have been made by the jobs.py script
-def getJobList(filename, hostname):
-  # Each line is in the format:
-  # hostname:jobid1,userid1;jobid2,userid2;...
-
-  # Check if the file with the job lists exists
-  if os.path.exists(filename):
-    # Check for file corruption
-    result = subprocess.run(
-      ['file -b %s' % (filename)],
-      shell=True,
-      stdout=subprocess.PIPE,
-      stderr=subprocess.PIPE,
-      universal_newlines=True,  # Works in 3.6 and 3.9 (decodes stdout/stderr to str)
-      check=True,  # Optional: raises CalledProcessError if return code != 0
-    )
-    output = result.stdout.strip()
-
-    if not "ASCII text" in output and not "CSV text" in output:
-      # Write a warning about the corrupted file
-      iFileName = rootDir+"log/"+hostname+".err"
-      file = open(iFileName, "w")
-      file.write(hostname+": Unable to read "+filename+"\n")
-      file.close()
-      sys.exit()
-
-    # Search for hostname in the file
-    for line in open(filename):
-      node, joblist = line.rstrip('\n').split(':')
-      if node == hostname:
-        jobs = []
-        for job in joblist.split(';'):
-          jobid, userid, nodeCount, account = job.split(',')
-          jobs.append([jobid,userid,nodeCount,account])
-
-        return jobs
-
-  return []
-
-# ******************************************************************************
-
-# Get the job id and the number of nodes that the user is running on.
-def getJobInfo(joblist, userid):
-  for job, user, nodeCount, account in joblist:
-    if user == userid:
-      return (job, nodeCount, account)
-
-  return ("", "", "")
+  return  ok
 
 # ******************************************************************************
 
 # Get a list of information about the processes currently running on this
 # compute node
-def getProcessInfo(hostname, jobList):
+def getProcessInfo(hostname):
   known   = dict()
   unknown = []
 
@@ -222,17 +152,16 @@ def getProcessInfo(hostname, jobList):
       continue
 
     # Store information about an unknown process and then skip it
-    jobid, nodeCount, account = getJobInfo(jobList, user)
+    jobid, nodeCount, account = joblist.getJobInfo(user)
     if not nodeCount:
-      appName = appinfo.getAppName(path)
-      x = [hostname, user, pid, appName, exe]
+      x = [hostname, user, pid, exe]
       if not x in unknown:
         unknown.append(x)
       continue
 
     # Skip job scheduler processes
-    if pcpu == "0.0":
-      continue
+    # if pcpu == "0.0":
+    #   continue
 
     efficiency = float(pcpu)
 
@@ -241,42 +170,9 @@ def getProcessInfo(hostname, jobList):
       known[exe][2] += efficiency
       known[exe][3] += 1
     else:
-      appName = appinfo.getAppName(path)
-      known[exe] = [now, user, efficiency, 1, appName, path, jobid, nodeCount, account]
+      known[exe] = [now, user, efficiency, 1, path, jobid, nodeCount, account]
 
-  return known, unknown
-
-# ******************************************************************************
-
-# Store the latest information, while correcting previous errors
-def writeLogData(known, unknown, fileName):
-  fileExists = os.path.exists(fileName)
-
-  # Read all the previous entries in the current log file
-  if fileExists:
-    logEntries = list();
-    for line in open(fileName):
-      fields = line.rstrip('\n').split(':')
-      # Only add lines that are not corrupted
-      ok = all(f != "" and all(ord(c) >= 32 for c in f) for f in fields)
-      # First character must be a number
-      if ok:
-        ok = fields[0][0].isdigit()
-      # Add the log entry
-      if ok:
-        logEntries.append(fields)
-
-  # Rewrite all information to the log file
-  file = open(fileName, "w")
-
-  # Store all old entries in the log file, while reclassifying the unknown entries
-  if fileExists:
-    for time,user,eff,app,path,jobid,nodeCount,coreCount,account in logEntries:
-      if app in checkCategories:
-        app = appinfo.getAppName(path)
-      file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (time, user, eff, app, path, jobid, nodeCount, coreCount, account))
-
-  # Store all new entries in the log file
+  log = ""
   for exe in known:
     info = known[exe]
 
@@ -285,44 +181,44 @@ def writeLogData(known, unknown, fileName):
     cores = info[3]
     if cores > coresPerNode: cores = coresPerNode 
 
-    file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], info[7], cores, info[8]))
-  file.close()
+    # Format: time, user, efficiency, path, jobid, coresPerNode, account
+    log = log + "%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], cores, info[7])
 
-  # Store information about unknown processes on this node 
-  iFileName = fileName+".err"
-  if len(unknown) == 0:
-    # Delete the file hostname.err, if there are no unknown processes
-    if os.path.exists(iFileName):
-      os.remove(iFileName)
-  else:
-    lines = ""
-    for host, user, pid, appName, exe in unknown:
-      if not user in allowedUsers:
-        lines = lines + "%s: %s, %s, %s, %s\n" % (host, pid, user, appName, exe)
-    if lines == "":
-      # Delete the file hostname.err, if there are no unknown processes
-      if os.path.exists(iFileName):
-        os.remove(iFileName)
-    else:
-      file = open(fileName+".err", "w")
-      file.write(lines)
-      file.close()
+  errors = ""
+  for host, user, pid, exe in unknown:
+    if not user in allowedUsers:
+      errors = errors + "%s: %s, %s, %s\n" % (host, pid, user, exe)
 
+  return log, errors
 
 # ******************************************************************************
 
+# Store the latest information, while correcting previous errors
+def writeLogData(log, errors, fileName):
+  # Store all new entries in the log file
+  with open(fileName, "a") as file:
+    file.write(log)
+
+  # Store information about unknown processes on this node 
+  errorFileName = fileName+".err"
+
+  if os.path.exists(errorFileName):
+    os.remove(errorFileName)
+
+  if len(errors) > 0:
+    with open(errorFileName, "w") as file:
+      file.write(errors)
+
+# ******************************************************************************
 
 # Main
 
+# Read the config file
+ok = init()
 
-# Read global variables
-init()
+if ok:
+  # Get information about the processes currently running on this compute node
+  log, errors = getProcessInfo(hostName)
 
-# Read the list of jobs that should be running on this node
-jobList = getJobList(rootDir+"log/joblist", hostName)
-
-# Get information about the processes currently running on this compute node
-known, unknown = getProcessInfo(hostName, jobList)
-
-# Store the process information in a file 
-writeLogData(known, unknown, rootDir + "log/" + hostName)
+  # Store the process information in a file 
+  writeLogData(log, errors, rootDir + "log/" + hostName)
