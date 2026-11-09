@@ -11,7 +11,7 @@ import re
 lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib'))
 sys.path.insert(0, lib_path)
 
-import accountinfo, userinfo, appinfo
+import accountinfo, userinfo
 
 # Constant, must be set
 
@@ -106,8 +106,6 @@ def init():
   if not userinfo.init(config, 'Appusage'):
     return 0
 
-  appinfo.init(config, "Log", rootDir)
-
   if config.has_option("Appusage", "islands"):
     line = config.get('Appusage', 'islands').strip()
     for island in line.split(':'):
@@ -119,6 +117,14 @@ def init():
       else:
         single = int(limits[0])
         islands.append([single,single])
+
+  # Read a list of categories from the category-list file in the log dir
+  categoryFile = rootDir + 'log/category-list'
+  if os.path.exists(categoryFile):
+    for line in open(categoryFile):
+      categories.append( line.rstrip('\n') )
+
+  categories.append("Unknown")
 
   return 1
 
@@ -145,18 +151,18 @@ def interpretLogData(file, line):
 
   # Split the line into : separated words
   fields = line.split(':')
-  # Format: time, user, efficiency, path, jobid, coresPerNode, account
+  # Format: time, user, efficiency, category, path, jobid, coresPerNode, account
 
   if len(fields) < 4:
     print("Error: the file \"%s\" contains a line with an error. The reason for this may be that the file was being updated while you read it. Contact a system administrator, if the error persists." % (file))
     print("Skipping line")
     error = 1
-  if error == 0 and len(fields) < 8:
+  if error == 0 and len(fields) < 9:
     error = 1
 
   if not error:
     # Find the name of the executable. Remove ' (deleted)' from path
-    exe = os.path.basename( fields[3].split(' ')[0] )
+    exe = os.path.basename( fields[4].split(' ')[0] )
 
     # Skip truncated paths
     if exe == "":
@@ -182,11 +188,11 @@ def interpretLogData(file, line):
       error = 1
 
   if not error:
-    category = appinfo.getAppName(fields[3])
-    jobid    = fields[4]
-    nNodes   = fields[5]
-    nCores   = fields[6]
-    account  = fields[7]
+    category = fields[3].strip()
+    jobid    = fields[5]
+    nNodes   = fields[6]
+    nCores   = fields[7]
+    account  = fields[8]
 
     if account == "" or date < startDate or date > endDate:
       error = 1
@@ -235,6 +241,14 @@ def calcOverallStat(logDirs):
   jobs_per_category_per_nodes             = dict()
   jobs_per_category_per_account_per_nodes = dict()
 
+  # Reset the statistics
+  for category in categories:
+    entries[category]      = dict()
+    entriesCount[category] = dict()
+    localNodes[category]   = dict()
+    cores[category]        = dict()
+    coresCount[category]   = dict()
+
   for logDir in logDirs:
     # Go through each file in the log dir, but skip .err files
     for file in glob(logDir+nodesRegex):
@@ -251,19 +265,15 @@ def calcOverallStat(logDirs):
         if error:
           continue
 
-        if not category in categories:
-          categories.append(category)
-          entries[category]      = dict()
-          entriesCount[category] = dict()
-          localNodes[category]   = dict()
-          cores[category]        = dict()
-          coresCount[category]   = dict()
-
         # Conversion from string to int
         if nNodes:
           inNodes = int(float(nNodes))
         if nCores:
           inCores = int(float(nCores))
+
+        if not category in entriesCount:
+          print("Error: category %s not found" % (category))
+          continue
 
         # Find entries over multiple accounts
         if exe in entriesCount[category]:
@@ -2052,9 +2062,9 @@ def main():
   for o, a in opts:
     if o in ('-u', '--user'):
       # check if the user name exists
-      check_username(a)
+      accountinfo.check_username(a)
       # check if the user has the right to check this user
-      check_priv(a)
+      accountinfo.check_priv(a)
 
       # add the user to the list of specific_users
       specific_users.append(a)
@@ -2089,6 +2099,14 @@ def main():
         if not os.path.exists(logDir):
           print("Error: no log data exists for " + period)
           sys.exit(2)
+
+        # Update the list of categories
+        categoryFile = logDir + 'category-list'
+        if os.path.exists(categoryFile):
+          for line in open(categoryFile):
+            category = line.rstrip('\n')
+            if not category in categories:
+              categories.append( category )
 
         start = period.find('.') - 2
         end   = start + 2

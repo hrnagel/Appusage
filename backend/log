@@ -154,7 +154,8 @@ def getProcessInfo(hostname):
     # Store information about an unknown process and then skip it
     jobid, nodeCount, account = joblist.getJobInfo(user)
     if not nodeCount:
-      x = [hostname, user, pid, exe]
+      appName = appinfo.getAppName(path)
+      x = [hostname, user, pid, appName, exe]
       if not x in unknown:
         unknown.append(x)
       continue
@@ -170,7 +171,8 @@ def getProcessInfo(hostname):
       known[exe][2] += efficiency
       known[exe][3] += 1
     else:
-      known[exe] = [now, user, efficiency, 1, path, jobid, nodeCount, account]
+      appName = appinfo.getAppName(path)
+      known[exe] = [now, user, efficiency, 1, appName, path, jobid, nodeCount, account]
 
   log = ""
   for exe in known:
@@ -182,12 +184,12 @@ def getProcessInfo(hostname):
     if cores > coresPerNode: cores = coresPerNode 
 
     # Format: time, user, efficiency, path, jobid, coresPerNode, account
-    log = log + "%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], cores, info[7])
+    log = log + "%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], info[7], cores, info[8])
 
   errors = ""
-  for host, user, pid, exe in unknown:
+  for host, user, pid, appName, exe in unknown:
     if not user in allowedUsers:
-      errors = errors + "%s: %s, %s, %s\n" % (host, pid, user, exe)
+      errors = errors + "%s: %s, %s, %s, %s\n" % (host, pid, user, appName, exe)
 
   return log, errors
 
