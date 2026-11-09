@@ -147,7 +147,7 @@ def querySlurm():
       # Remove [ and ] from the string
       account = line.lstrip('[').rstrip(']')
       account_split = account.split('.')
-      if len(account_split) == 3:
+      if len(account_split) == 2:
         account = account_split[1]
       else:
         continue
@@ -177,11 +177,15 @@ def querySlurm():
           else:
             account_users[account] = [name]
     elif ok: # Process the quota for the last account encountered
-      if "billing =" in line:
-        line_split = line.split('=')
-        if len(line_split) != 2:
+      if "billing=" in line:
+        billings = line.split('"')[1]
+        if len(billings) < 2:
           continue
-        quota = line_split[1].strip()
+        cpu_billing = billings.split(',')[0]
+        cpu_billing_split = cpu_billing.split('=')
+        if len(cpu_billing_split) != 2:
+          continue
+        quota = cpu_billing_split[1].strip()
         account_quota[account] = "%d" % (int(account_quota[account]) + int(quota))
 
   # Get the usage for each account from Slurm
